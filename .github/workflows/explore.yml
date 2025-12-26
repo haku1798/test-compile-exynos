@@ -1,48 +1,113 @@
-name: Explore Kernel Structure
-on: workflow_dispatch
+name: Explore Kernel Repository Structure
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Branch to explore (suggested: android-4.19-stable)'
+        required: false
+        default: 'android-4.19-stable'
 
 jobs:
   explore:
     runs-on: ubuntu-22.04
     steps:
-      - name: Clone kernel repository
+      - name: Clone and analyze repository
         run: |
-          echo "Cloning Samsung Exynos850 kernel..."
-          git clone https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel-explore
+          echo "🧬 Starting kernel repository structure exploration..."
+          echo "Repository: https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850"
+          echo "Target branch: ${{ inputs.kernel_branch || 'android-4.19-stable' }}"
           
-      - name: Analyze repository structure
-        run: |
-          cd kernel-explore
-          echo "=== REPOSITORY STRUCTURE ANALYSIS ==="
-          echo ""
-          echo "1. Top-level directories:"
-          ls -la
-          echo ""
+          # Clone specified branch
+          BRANCH="${{ inputs.kernel_branch || 'android-4.19-stable' }}"
+          echo "Cloning branch: $BRANCH"
           
-          echo "2. Checking for Android build structure:"
-          find . -name "Android.mk" -o -name "BoardConfig.mk" -o -name "device.mk" | head -10
-          echo ""
+          if git clone --depth=1 --branch "$BRANCH" \
+             https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git \
+             kernel_explore; then
+            echo "✅ Repository cloned successfully"
+          else
+            echo "⚠️  Unable to clone specified branch '$BRANCH', trying default branch..."
+            git clone --depth=1 \
+              https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git \
+              kernel_explore
+          fi
           
-          echo "3. Searching for all defconfig/kconfig files:"
-          find . -type f -name "*defconfig*" -o -name "*config*" | grep -v ".git" | head -30
-          echo ""
+          cd kernel_explore
           
-          echo "4. Kernel version info:"
+          echo -e "\n📊 ========== Repository Basic Information =========="
+          echo "Current branch: $(git branch --show-current || echo 'unspecified')"
+          echo "Latest commit: $(git log --oneline -1)"
+          
+          echo -e "\n📁 ========== Kernel Version Information =========="
           if [ -f "Makefile" ]; then
             echo "Main Makefile exists"
-            grep -E "VERSION|PATCHLEVEL|SUBLEVEL" Makefile | head -5
+            grep -E "VERSION|PATCHLEVEL|SUBLEVEL" Makefile | head -3
+            KERNEL_VERSION=$(grep "^VERSION" Makefile | cut -d' ' -f3)
+            KERNEL_PATCHLEVEL=$(grep "^PATCHLEVEL" Makefile | cut -d' ' -f3)
+            KERNEL_SUBLEVEL=$(grep "^SUBLEVEL" Makefile | cut -d' ' -f3)
+            echo "Kernel version: $KERNEL_VERSION.$KERNEL_PATCHLEVEL.$KERNEL_SUBLEVEL"
           else
-            echo "No top-level Makefile found"
+            echo "❌ Error: Main Makefile not found, not a standard kernel source"
           fi
-          echo ""
           
-          echo "5. Arch directories:"
-          find . -type d -name "arm64" -o -name "arm" | head -10
-          echo ""
+          echo -e "\n🔧 ========== Build Configuration Files (build.config.*) =========="
+          echo "Found build configuration files:"
+          ls -la build.config.* 2>/dev/null | head -20 || echo "No build.config files found"
           
-          echo "6. Checking for Samsung-specific structure:"
-          find . -type d -name "exynos*" -o -name "samsung*" | head -10
-          echo ""
+          echo -e "\n📋 ========== Build Config File Content Samples =========="
+          # Show content of key config files
+          for config in erd3830 universal3830_32bit_s universal3830_s; do
+            if [ -f "build.config.$config" ]; then
+              echo -e "\n--- build.config.$config ---"
+              head -20 "build.config.$config"
+            fi
+          done
           
-          echo "7. Looking for product/vendor directories:"
-          find . -type d -name "product" -o -name "vendor" | head -10
+          echo -e "\n🏷️  ========== Vendor Configuration Files =========="
+          if [ -d "arch/arm64/configs/vendor" ]; then
+            echo "Vendor config directory structure:"
+            find arch/arm64/configs/vendor -name "*.cfg" | head -15
+            echo -e "\nSample config file content:"
+            VENDOR_CFG=$(find arch/arm64/configs/vendor -name "*.cfg" | head -1)
+            if [ -n "$VENDOR_CFG" ]; then
+              echo "File: $VENDOR_CFG"
+              head -10 "$VENDOR_CFG"
+            fi
+          else
+            echo "Vendor config directory not found"
+          fi
+          
+          echo -e "\n🏗️  ========== Architecture Configuration Files =========="
+          if [ -d "arch/arm64/configs" ]; then
+            echo "ARM64 config files:"
+            ls arch/arm64/configs/ 2>/dev/null | head -15
+          fi
+          
+          echo -e "\n📱 ========== Device Tree Files =========="
+          echo "Exynos 850 related device tree files:"
+          find . -name "*.dts" -o -name "*.dtsi" | grep -i "exynos850\|3830\|a13" | head -10
+          
+          echo -e "\n📦 ========== Android Build Files =========="
+          find . -name "Android.mk" -o -name "*.mk" | grep -i "board\|device\|product" | head -5
+          
+          echo -e "\n🔍 ========== Traditional defconfig File Search =========="
+          find . -type f \( -name "*defconfig*" -o -name "defconfig" \) | grep -v ".git" | head -10
+          
+          echo -e "\n📈 ========== Build Configuration Recommendations =========="
+          echo "Based on exploration results, the following may be configuration options for Galaxy A13 (SM-A135F):"
+          echo "1. Build config file: build.config.universal3830_32bit_s (32-bit kernel, for A13)"
+          echo "2. Build config file: build.config.erd3830 (Exynos 850 reference config)"
+          echo "3. Target device: universal3830_32bit_s"
+          echo "4. Kernel branch: $BRANCH"
+          echo "5. Architecture: arm64 (but kernel may run in 32-bit mode)"
+          
+          echo -e "\n✅ Exploration complete! Use the above information for build configuration."
+
+      - name: Upload exploration report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kernel-Exploration-Report
+          path: |
+            kernel_explore/
+          retention-days: 1
