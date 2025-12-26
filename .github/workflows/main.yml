@@ -9,80 +9,135 @@ on:
         type: choice
         options:
           - 'merlin'
+      kernel_branch:
+        description: 'Kernel branch/tag (optional)'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout kernel source
-        uses: actions/checkout@v3
-        with:
-          path: kernel
-
-      - name: Debug - Check workspace structure
+      # Step 1: Clone the Samsung kernel repository
+      - name: Clone Samsung Kernel Source
         run: |
-          echo "Current workspace: $(pwd)"
+          echo "Cloning Samsung Exynos850 kernel repository..."
+          git clone --depth=1 https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel
+          cd kernel
+          if [ -n "${{ inputs.kernel_branch }}" ]; then
+            echo "Checking out branch/tag: ${{ inputs.kernel_branch }}"
+            git checkout ${{ inputs.kernel_branch }}
+          fi
+          echo "Kernel source cloned successfully"
+
+      # Step 2: Verify kernel source structure
+      - name: Verify kernel source
+        run: |
+          cd kernel
+          echo "Kernel directory structure:"
           ls -la
-          if [ -d "kernel" ]; then
-            echo "Kernel directory exists"
-            ls -la kernel/
+          echo -e "\nChecking for essential kernel files..."
+          if [ -f "Makefile" ]; then
+            echo "✅ Makefile found"
           else
-            echo "ERROR: Kernel directory not found after checkout"
+            echo "❌ ERROR: Makefile not found - not a valid kernel source"
+            exit 1
+          fi
+          if [ -d "arch/arm64" ]; then
+            echo "✅ ARM64 architecture directory found"
+          else
+            echo "❌ ERROR: ARM64 architecture not found"
             exit 1
           fi
 
+      # Step 3: Find the correct defconfig for the device
+      - name: Find device defconfig
+        id: defconfig
+        run: |
+          cd kernel
+          echo "Searching for defconfig files..."
+          
+          # First, check for device-specific defconfigs
+          if [ -d "arch/arm64/configs" ]; then
+            cd arch/arm64/configs
+            echo "Available defconfigs:"
+            ls *.defconfig | head -20
+            
+            # Try to find the right defconfig
+            CONFIG=""
+            # Search for A13 or Exynos850 related configs
+            for pattern in "a13" "exynos850" "a135" "merlin"; do
+              if [ -z "$CONFIG" ]; then
+                CONFIG=$(ls | grep -i "$pattern" | head -1)
+                if [ -n "$CONFIG" ]; then
+                  echo "Found defconfig with pattern '$pattern': $CONFIG"
+                  break
+                fi
+              fi
+            done
+            
+            if [ -z "$CONFIG" ]; then
+              CONFIG="exynos850_defconfig"
+              echo "⚠️  No specific defconfig found, using default: $CONFIG"
+            fi
+            
+            echo "config_name=$CONFIG" >> $GITHUB_OUTPUT
+          else
+            echo "❌ arch/arm64/configs directory not found"
+            echo "config_name=exynos850_defconfig" >> $GITHUB_OUTPUT
+          fi
+
+      # Step 4: Integrate SukiSU-Ultra
       - name: Integrate SukiSU-Ultra
         run: |
           cd kernel
-          echo "Current directory: $(pwd)"
-          echo "Checking for kernel source..."
+          echo "Current Linux version:"
+          head -5 Makefile | grep VERSION
           
-          # First verify this is a kernel source directory
-          if [ ! -f "Makefile" ]; then
-            echo "❌ ERROR: Not a kernel source directory (Makefile missing)"
-            echo "Directory contents:"
-            ls -la
-            exit 1
+          echo "Running SukiSU-Ultra integration for non-GKI kernel..."
+          
+          # Download and run the setup script
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" -o setup_sukisu.sh
+          if [ -f "setup_sukisu.sh" ]; then
+            chmod +x setup_sukisu.sh
+            ./setup_sukisu.sh nongki
+          else
+            echo "⚠️  Could not download SukiSU script, trying alternative method..."
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki || echo "SukiSU script execution had issues"
           fi
           
-          echo "✅ Kernel source verified (Makefile found)"
-          echo "Running SukiSU-Ultra integration..."
-          
-          # Run the SukiSU setup script
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
-          
-          # Alternative: Clone and run locally if curl fails
-          # git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
-          # cd /tmp/sukisu/kernel && bash setup.sh nongki $GITHUB_WORKSPACE/kernel
-          
-          # Verify integration was successful
+          # Check if integration worked
           if [ -f "drivers/kernel_pm/kpm.c" ]; then
             echo "✅ SukiSU-Ultra integrated successfully"
           else
-            echo "⚠️ Warning: drivers/kernel_pm/kpm.c not found, but continuing..."
-            echo "Checking for other SukiSU files..."
-            find . -name "*suki*" -o -name "*kpm*" | head -20
+            echo "⚠️  SukiSU integration may have failed - checking for other signs..."
+            find . -type f -name "*.c" -o -name "*.h" | xargs grep -l "kpm\|suki" 2>/dev/null | head -10
+            echo "Continuing build anyway..."
           fi
 
+      # Step 5: Install build dependencies
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses-dev bison flex \
-          libssl-dev libelf-dev bc git ccache python3
+          libssl-dev libelf-dev bc git ccache python3 rsync
 
+      # Step 6: Build the kernel
       - name: Build Kernel
         uses: dabao1955/kernel_build_action@main
         with:
           kernel-dir: kernel
-          config: exynos850_defconfig
+          config: ${{ steps.defconfig.outputs.config_name }}
           arch: arm64
           android-version: 12
+          # Using GCC toolchain for better compatibility with older 4.19 kernel
           aosp-clang: false
           aosp-gcc: true
           aosp-gcc-version: "arm64-12"
           anykernel3: true
           use-ccache: true
 
+      # Step 7: Upload the built kernel
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -93,10 +148,12 @@ jobs:
             kernel/out/.config
           retention-days: 7
 
+      # Step 8: Final status
       - name: Display Build Info
         if: success()
         run: |
-          echo "✅ Build completed successfully!"
+          echo "✅ Kernel build completed successfully!"
           echo "📦 Artifact name: Compiled-Kernel-Exynos850"
-          echo "📁 Find it in: GitHub Actions → Artifacts section"
-          echo "⚡ Kernel includes: SukiSU-Ultra integration"
+          echo "📁 Download from: GitHub Actions → Artifacts section"
+          echo "🔧 Using defconfig: ${{ steps.defconfig.outputs.config_name }}"
+          echo "⚡ Includes SukiSU-Ultra integration attempt"
