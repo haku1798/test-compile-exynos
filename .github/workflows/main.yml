@@ -1,0 +1,31 @@
+name: Build Kernel
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v3
+        with:
+          path: kernel
+      - name: Integrate SukiSU-Ultra
+        run: >
+          cd kernel
+
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+      - name: Build Kernel
+        uses: dabao1955/kernel_build_action@main
+        with:
+          kernel-dir: kernel
+          config: exynos850_defconfig
+          arch: arm64
+          android-version: 12
+          aosp-clang: true
+          aosp-clang-version: r383902
+          anykernel3: true
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Compiled-Kernel-A13
+          path: |
+            kernel/out/AnyKernel3/*.zip
+            kernel/out/arch/arm64/boot/Image
