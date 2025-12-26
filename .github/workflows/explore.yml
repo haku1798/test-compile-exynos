@@ -1,0 +1,48 @@
+name: Explore Kernel Structure
+on: workflow_dispatch
+
+jobs:
+  explore:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Clone kernel repository
+        run: |
+          echo "Cloning Samsung Exynos850 kernel..."
+          git clone https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel-explore
+          
+      - name: Analyze repository structure
+        run: |
+          cd kernel-explore
+          echo "=== REPOSITORY STRUCTURE ANALYSIS ==="
+          echo ""
+          echo "1. Top-level directories:"
+          ls -la
+          echo ""
+          
+          echo "2. Checking for Android build structure:"
+          find . -name "Android.mk" -o -name "BoardConfig.mk" -o -name "device.mk" | head -10
+          echo ""
+          
+          echo "3. Searching for all defconfig/kconfig files:"
+          find . -type f -name "*defconfig*" -o -name "*config*" | grep -v ".git" | head -30
+          echo ""
+          
+          echo "4. Kernel version info:"
+          if [ -f "Makefile" ]; then
+            echo "Main Makefile exists"
+            grep -E "VERSION|PATCHLEVEL|SUBLEVEL" Makefile | head -5
+          else
+            echo "No top-level Makefile found"
+          fi
+          echo ""
+          
+          echo "5. Arch directories:"
+          find . -type d -name "arm64" -o -name "arm" | head -10
+          echo ""
+          
+          echo "6. Checking for Samsung-specific structure:"
+          find . -type d -name "exynos*" -o -name "samsung*" | head -10
+          echo ""
+          
+          echo "7. Looking for product/vendor directories:"
+          find . -type d -name "product" -o -name "vendor" | head -10
