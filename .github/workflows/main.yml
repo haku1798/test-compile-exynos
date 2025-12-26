@@ -33,6 +33,15 @@ jobs:
           cd kernel
           echo "✅ Kernel version: $(grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | tr '\n' '.' | sed 's/\.$//')"
 
+      - name: Analyze defconfig options
+        run: |
+          cd kernel
+          echo "🔍 Available defconfig files in arch/arm64/configs/:"
+          ls -la arch/arm64/configs/ 2>/dev/null || echo "No arch/arm64/configs directory"
+          echo ""
+          echo "🔍 Searching for all defconfig files..."
+          find . -name "*defconfig*" -type f | grep -v ".git" | head -20
+
       - name: Install build dependencies
         run: |
           echo "📦 Installing dependencies..."
@@ -44,9 +53,6 @@ jobs:
         run: |
           cd kernel
           echo "🔓 Integrating SukiSU-Ultra in ${{ inputs.sukisu_mode }} mode..."
-          echo "Mode details:"
-          echo "  • builtin: Compiled directly into kernel (recommended for production)"
-          echo "  • main: Loadable Kernel Module (LKM) for testing/development"
           
           # Download the setup script
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" -o setup_sukisu.sh
@@ -65,27 +71,10 @@ jobs:
           
           # Post-integration verification
           echo "🔍 Verifying integration..."
-          
-          # Check for KPM files
           if [ -f "drivers/kernel_pm/kpm.c" ]; then
             echo "✅ SukiSU kernel module source found at drivers/kernel_pm/kpm.c"
-            
-            # Check config for correct mode
-            if [ "${{ inputs.sukisu_mode }}" = "builtin" ]; then
-              echo "Ensuring CONFIG_KPM=y for builtin mode..."
-              # For builtin, KPM should be y (not m)
-              sed -i 's/CONFIG_KPM=m/CONFIG_KPM=y/' .config 2>/dev/null || true
-              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' .config 2>/dev/null || true
-            else
-              echo "Ensuring CONFIG_KPM=m for LKM mode..."
-              # For main mode, KPM should be m (module)
-              sed -i 's/CONFIG_KPM=y/CONFIG_KPM=m/' .config 2>/dev/null || true
-              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=m/' .config 2>/dev/null || true
-            fi
           else
             echo "⚠️ SukiSU files not found in standard location"
-            echo "Searching for kpm files..."
-            find . -type f -name "*kpm*" -o -name "*suki*" | head -10
           fi
 
       - name: Build using Android build config
@@ -110,7 +99,7 @@ jobs:
           
           echo "📋 Build configuration:"
           echo "  Architecture: $ARCH"
-          echo "  Defconfig: $DEFCONFIG"
+          echo "  Original DEFCONFIG: $DEFCONFIG"
           echo "  Cross compiler: $CROSS_COMPILE"
           echo "  Clang version: $CLANG_VERSION"
           echo "  Target SoC: $TARGET_SOC"
@@ -120,38 +109,56 @@ jobs:
           export CROSS_COMPILE=$CROSS_COMPILE
           export CLANG_TRIPLE=$CLANG_TRIPLE
           
-          # Download toolchain if CLANG_VERSION is set
-          if [ -n "$CLANG_VERSION" ]; then
-            echo "🔧 Setting up toolchain: $CLANG_VERSION"
-            # This would need proper toolchain setup based on CLANG_VERSION
-            # For now, we'll rely on system toolchain
-          fi
-          
-          # Apply the defconfig
-          echo "Applying defconfig: $DEFCONFIG"
-          if [ -f "arch/$ARCH/configs/$DEFCONFIG" ]; then
-            make $DEFCONFIG
+          # DETERMINE CORRECT DEFCONFIG
+          # The build.config says universal3830_s_launching_defconfig but it doesn't exist
+          # From exploration, we have: a13xx_defconfig and exynos850-a13xx_defconfig
+          # Let's use the most appropriate one
+          if [ -f "arch/$ARCH/configs/a13xx_defconfig" ]; then
+            ACTUAL_DEFCONFIG="a13xx_defconfig"
+            echo "✅ Using defconfig: $ACTUAL_DEFCONFIG (A13 specific)"
+          elif [ -f "arch/$ARCH/configs/exynos850-a13xx_defconfig" ]; then
+            ACTUAL_DEFCONFIG="exynos850-a13xx_defconfig"
+            echo "✅ Using defconfig: $ACTUAL_DEFCONFIG (Exynos 850 A13)"
           else
-            echo "❌ Defconfig not found at arch/$ARCH/configs/$DEFCONFIG"
-            echo "Searching for defconfig..."
-            find . -name "*$DEFCONFIG*" -type f | head -5
+            echo "❌ No suitable defconfig found!"
+            echo "Available defconfigs in arch/$ARCH/configs/:"
+            ls arch/$ARCH/configs/ 2>/dev/null || echo "Directory not found"
             exit 1
           fi
           
+          # Apply the defconfig
+          echo "Applying defconfig: $ACTUAL_DEFCONFIG"
+          make $ACTUAL_DEFCONFIG
+          
           # Update configuration for SukiSU mode
-          if [ "$SUKISU_MODE" = "builtin" ]; then
-            echo "⚙️ Configuring kernel for builtin SukiSU..."
-            # Ensure KPM is built-in
-            scripts/config --set-val CONFIG_KPM y
-            scripts/config --undefine CONFIG_KPM_MODULE
+          echo "⚙️ Configuring kernel for SukiSU..."
+          
+          # First, ensure we have the scripts/config utility
+          if [ ! -f "scripts/config" ]; then
+            echo "⚠️ scripts/config not found, using sed for config changes"
+            if [ "$SUKISU_MODE" = "builtin" ]; then
+              # Enable KPM as built-in
+              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' .config 2>/dev/null || true
+              sed -i 's/CONFIG_KPM=m/CONFIG_KPM=y/' .config 2>/dev/null || true
+            else
+              # Enable KPM as module
+              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=m/' .config 2>/dev/null || true
+              sed -i 's/CONFIG_KPM=y/CONFIG_KPM=m/' .config 2>/dev/null || true
+            fi
           else
-            echo "⚙️ Configuring kernel for LKM SukiSU..."
-            # Ensure KPM is a module
-            scripts/config --set-val CONFIG_KPM m
-            scripts/config --set-val CONFIG_KPM_MODULE y
+            if [ "$SUKISU_MODE" = "builtin" ]; then
+              scripts/config --set-val CONFIG_KPM y
+            else
+              scripts/config --set-val CONFIG_KPM m
+            fi
           fi
           
+          # Also enable KALLSYMS and KALLSYMS_ALL for SukiSU
+          sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' .config 2>/dev/null || true
+          sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' .config 2>/dev/null || true
+          
           # Finalize config
+          echo "Finalizing kernel configuration..."
           make oldconfig
           
           # Build the kernel
@@ -164,23 +171,29 @@ jobs:
             ls -lh "arch/$ARCH/boot/Image"
             echo "kernel_image=arch/$ARCH/boot/Image" >> $GITHUB_OUTPUT
             echo "kernel_version=4.19.227" >> $GITHUB_OUTPUT
-            
-            # Check if modules were built (for LKM mode)
-            if [ "$SUKISU_MODE" = "main" ]; then
-              if find . -name "kpm.ko" -o -name "*.ko" | grep -q "kpm"; then
-                echo "✅ SukiSU kernel module (kpm.ko) built"
-              else
-                echo "⚠️ No kpm.ko module found (check if CONFIG_KPM=m)"
-              fi
-            fi
+            echo "defconfig_used=$ACTUAL_DEFCONFIG" >> $GITHUB_OUTPUT
           else
             echo "❌ Build failed - no kernel image found"
-            echo "Build log tail:"
-            tail -50 .make.log 2>/dev/null || echo "No .make.log found"
-            exit 1
+            echo "Trying with fewer threads..."
+            make -j2 || {
+              echo "Build still failed, checking for errors..."
+              exit 1
+            }
+            
+            # Check again
+            if [ -f "arch/$ARCH/boot/Image" ]; then
+              echo "✅ Kernel image built successfully with -j2!"
+              ls -lh "arch/$ARCH/boot/Image"
+              echo "kernel_image=arch/$ARCH/boot/Image" >> $GITHUB_OUTPUT
+              echo "kernel_version=4.19.227" >> $GITHUB_OUTPUT
+              echo "defconfig_used=$ACTUAL_DEFCONFIG" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Build completely failed"
+              exit 1
+            fi
           fi
 
-      - name: Create flashable package with SukiSU info
+      - name: Create flashable package
         run: |
           cd kernel
           echo "📦 Creating flashable package..."
@@ -193,19 +206,10 @@ jobs:
           # Copy the kernel image
           cp arch/arm64/boot/Image AnyKernel3/
           
-          # Copy modules if in LKM mode
-          if [ "${{ inputs.sukisu_mode }}" = "main" ]; then
-            echo "📁 Packaging modules for LKM mode..."
-            mkdir -p AnyKernel3/modules
-            find . -name "*.ko" -exec cp {} AnyKernel3/modules/ \;
-            ls -la AnyKernel3/modules/
-          fi
-          
           # Create device-specific anykernel.sh
           cat > AnyKernel3/anykernel.sh << EOF
           #!/bin/sh
           ## AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
           
           # Begin properties
           properties() {
@@ -219,7 +223,7 @@ jobs:
             device.name3=exynos850
           }
           
-          # Device block
+          # Device block (common for Exynos devices)
           block=/dev/block/platform/13500000.dwmmc0/by-name/BOOT;
           is_slot_device=0;
           ramdisk_compression=auto;
@@ -229,49 +233,17 @@ jobs:
           
           # AnyKernel install
           dump_boot;
-          
-          # Insert modules if in LKM mode
-          if [ -d "\$home/modules" ]; then
-            echo "Installing kernel modules..."
-            mkdir -p \$ramdisk/lib/modules
-            cp -rf \$home/modules/* \$ramdisk/lib/modules/
-            chmod -R 755 \$ramdisk/lib/modules
-          fi
-          
           write_boot;
           ## end install
           EOF
           
           chmod +x AnyKernel3/anykernel.sh
           
-          # Add build info
-          cat > AnyKernel3/README.md << EOF
-          # Galaxy A13 Exynos 850 Kernel
-          
-          **Device:** Samsung Galaxy A13 (SM-A135F)
-          **Kernel:** Linux 4.19.227
-          **Build Config:** ${{ inputs.build_config }}
-          **SukiSU Mode:** ${{ inputs.sukisu_mode }}
-          
-          ## Installation
-          1. Flash in custom recovery (TWRP/OrangeFox)
-          2. Clear dalvik/cache (recommended)
-          3. Reboot
-          
-          ## SukiSU Mode: ${{ inputs.sukisu_mode }}
-          $([ "${{ inputs.sukisu_mode }}" = "builtin" ] && echo "- Built-in: Root support compiled into kernel" || echo "- LKM: Root support as loadable module")
-          
-          ## Notes
-          - Test thoroughly before daily use
-          - Backup your current kernel first
-          - Report issues with logs
-          EOF
-          
           # Create the flashable ZIP
           cd AnyKernel3
-          zip -r9 ../kernel-a13-sukisu-${{ inputs.sukisu_mode }}.zip *
+          zip -r9 ../kernel-a13-sukisu-${{ inputs.sukisu_mode }}-$(date +%Y%m%d).zip *
           
-          echo "✅ Flashable ZIP created: kernel-a13-sukisu-${{ inputs.sukisu_mode }}.zip"
+          echo "✅ Flashable ZIP created"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -292,29 +264,18 @@ jobs:
           echo "========================================="
           echo "📱 Device: Samsung Galaxy A13 (SM-A135F)"
           echo "🐧 Kernel: Linux 4.19.227"
-          echo "⚙️  Config: ${{ inputs.build_config }}"
+          echo "⚙️  Build Config: ${{ inputs.build_config }}"
+          echo "🔧 Defconfig Used: ${{ steps.build_kernel.outputs.defconfig_used || 'a13xx_defconfig' }}"
           echo "🔓 SukiSU: ${{ inputs.sukisu_mode }} mode"
           echo "🔄 Branch: ${{ inputs.kernel_branch }}"
           echo ""
           echo "📦 Artifacts:"
-          echo "  • kernel-a13-sukisu-${{ inputs.sukisu_mode }}.zip - Flash in recovery"
+          echo "  • kernel-a13-sukisu-*.zip - Flash in recovery"
           echo "  • Image - Raw kernel image"
           echo "  • .config - Kernel configuration"
           echo ""
-          if [ "${{ inputs.sukisu_mode }}" = "builtin" ]; then
-            echo "🔧 SukiSU Mode: BUILTIN"
-            echo "   • Root support compiled into kernel"
-            echo "   • No modules to load separately"
-            echo "   • More stable, recommended for production"
-          else
-            echo "🔧 SukiSU Mode: MAIN (LKM)"
-            echo "   • Root support as loadable module"
-            echo "   • Module: kpm.ko (if built)"
-            echo "   • Useful for testing/development"
-          fi
-          echo ""
           echo "⚠️  IMPORTANT:"
-          echo "   • Backup current kernel first"
-          echo "   • Test thoroughly before daily use"
-          echo "   • Report issues with kernel logs"
+          echo "   • The build config specified universal3830_s_launching_defconfig"
+          echo "   • But we used ${{ steps.build_kernel.outputs.defconfig_used || 'a13xx_defconfig' }} as fallback"
+          echo "   • Test thoroughly before daily use!"
           echo "========================================="
