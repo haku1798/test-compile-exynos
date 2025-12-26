@@ -1,4 +1,13 @@
 name: Build Kernel
+on:
+  workflow_dispatch:
+    inputs:
+      select_device:
+        description: 'Select device:'
+        required: true
+        type: choice
+        options:
+        - 'merlin'
 jobs:
   build:
     runs-on: ubuntu-22.04
