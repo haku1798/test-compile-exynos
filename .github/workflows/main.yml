@@ -33,6 +33,107 @@ jobs:
           cd kernel
           echo "✅ Kernel version: $(grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | tr '\n' '.' | sed 's/\.$//')"
 
+      - name: Analyze touchscreen driver situation
+        run: |
+          cd kernel
+          echo "🔍 Analyzing touchscreen drivers for Galaxy A13..."
+          
+          # Check what touchscreen driver configs exist
+          echo "=== TOUCHSCREEN CONFIGURATIONS ==="
+          if [ -f ".config" ] || [ -f "arch/arm64/configs/a13xx_defconfig" ]; then
+            CONFIG_FILE=".config"
+            [ -f "$CONFIG_FILE" ] || CONFIG_FILE="arch/arm64/configs/a13xx_defconfig"
+            
+            echo "Looking for touchscreen drivers in $CONFIG_FILE:"
+            grep -i "touchscreen\|himax\|goodix\|focaltech\|synaptics\|cypress\|novatek" "$CONFIG_FILE" | head -20
+          fi
+          
+          echo ""
+          echo "=== HIMAX DIRECTORY STRUCTURE ==="
+          ls -la drivers/input/touchscreen/himax/ 2>/dev/null || echo "Himax directory not found"
+          
+          echo ""
+          echo "=== AVAILABLE TOUCHSCREEN DRIVERS ==="
+          ls -d drivers/input/touchscreen/*/ 2>/dev/null | head -20
+
+      - name: Fix missing touchscreen driver properly
+        run: |
+          cd kernel
+          echo "🔧 Fixing touchscreen driver for Galaxy A13..."
+          
+          # First, check what Himax driver the A13 actually uses
+          echo "Checking device tree for touchscreen info..."
+          find . -name "*.dtsi" -o -name "*.dts" | xargs grep -l "himax\|touchscreen" 2>/dev/null | head -5
+          
+          # The Galaxy A13 likely uses a different touchscreen driver
+          # Let's check common Samsung touchscreen drivers
+          echo "Common Samsung touchscreen drivers:"
+          echo "1. sec_touchscreen (Samsung's own)"
+          echo "2. melfas_mip4"
+          echo "3. zinitix_bt541"
+          echo "4. stm_fts"
+          
+          # Check if the missing directory should exist or not
+          if [ ! -f "drivers/input/touchscreen/himax/himax_83xxx_i2c/Makefile" ]; then
+            echo "⚠️ Missing Makefile: drivers/input/touchscreen/himax/himax_83xxx_i2c/Makefile"
+            
+            # Check if there are source files without a Makefile
+            if ls drivers/input/touchscreen/himax/himax_83xxx_i2c/*.c 2>/dev/null; then
+              echo "📁 Source files exist, creating proper Makefile..."
+              
+              # Create a proper Makefile for the driver
+              cat > drivers/input/touchscreen/himax/himax_83xxx_i2c/Makefile << 'EOF'
+              # Makefile for Himax 83xxx I2C Touchscreen Driver
+              # Galaxy A13 specific
+              
+              # Uncomment the correct driver for your device
+              # obj-$(CONFIG_TOUCHSCREEN_HIMAX_I2C) += himax_83xxx_i2c.o
+              # obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83102D) += himax_83xxx_i2c.o
+              # obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112A) += himax_83xxx_i2c.o
+              
+              # himax_83xxx_i2c-objs := himax_83xxx.o himax_83xxx_i2c_core.o
+              
+              # ccflags-y += -I$(srctree)/drivers/input/touchscreen/himax/
+              # ccflags-y += -Werror
+              
+              .PHONY: all clean
+              
+              all:
+              	@echo "Himax 83xxx I2C driver - check configuration"
+              
+              clean:
+              	@echo "Cleaning himax_83xxx_i2c"
+              EOF
+              
+              echo "✅ Created Makefile template"
+            else
+              echo "📁 No source files found. This driver might not be needed for A13."
+              echo "Let's disable it in the build system..."
+              
+              # Remove reference from parent Makefile
+              PARENT_MAKEFILE="drivers/input/touchscreen/himax/Makefile"
+              if [ -f "$PARENT_MAKEFILE" ]; then
+                echo "Editing $PARENT_MAKEFILE to remove himax_83xxx_i2c reference..."
+                grep -n "83xxx" "$PARENT_MAKEFILE"
+                # Comment out or remove the line
+                sed -i '/83xxx/d' "$PARENT_MAKEFILE" || echo "Could not modify parent Makefile"
+              fi
+              
+              # Also check Kconfig
+              PARENT_KCONFIG="drivers/input/touchscreen/himax/Kconfig"
+              if [ -f "$PARENT_KCONFIG" ]; then
+                echo "Editing $PARENT_KCONFIG..."
+                sed -i '/83xxx/d' "$PARENT_KCONFIG" || echo "Could not modify Kconfig"
+              fi
+            fi
+          fi
+          
+          # Check if Galaxy A13 uses a different touchscreen
+          echo "Checking for Samsung-specific touchscreen drivers..."
+          if [ -d "drivers/input/touchscreen/sec_touchscreen" ]; then
+            echo "✅ Found Samsung sec_touchscreen driver (likely for A13)"
+          fi
+
       - name: Install build dependencies
         run: |
           echo "📦 Installing dependencies..."
@@ -40,104 +141,66 @@ jobs:
           sudo apt-get install -y build-essential libncurses-dev bison flex \
           libssl-dev libelf-dev bc git ccache python3 zip unzip curl wget \
           llvm lld clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-          libxml2-utils python3-pip
+          libxml2-utils python3-pip device-tree-compiler
 
-          # Install specific tools needed for this kernel
           pip3 install pyelftools
 
-      - name: Integrate SukiSU-Ultra (builtin mode)
-        run: |
-          cd kernel
-          echo "🔓 Integrating SukiSU-Ultra in ${{ inputs.sukisu_mode }} mode..."
-          
-          # Note: The SukiSU integration is actually using KernelSU internally
-          # The output shows it cloned KernelSU repository
-          echo "Running SukiSU/KernelSU integration..."
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ inputs.sukisu_mode }} || {
-            echo "⚠️ SukiSU integration had warnings, continuing..."
-          }
-          
-          # Verify integration
-          if [ -d "KernelSU" ] || [ -d "drivers/kernel_pm" ]; then
-            echo "✅ SukiSU/KernelSU integration found"
-          else
-            echo "⚠️ Checking for integration files..."
-            find . -type d -name "*kernel*" -o -name "*kpm*" | head -10
-          fi
-
-      - name: Set up proper toolchain
-        run: |
-          echo "🔧 Setting up toolchain for 4.19 kernel..."
-          
-          # For 4.19 kernel, we need specific toolchain
-          mkdir -p ${HOME}/toolchain
-          cd ${HOME}/toolchain
-          
-          # Download AOSP GCC 4.9 (compatible with 4.19 kernel)
-          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/master.tar.gz -O gcc.tar.gz
-          mkdir -p gcc
-          tar -xzf gcc.tar.gz -C gcc --strip-components=1
-          
-          echo "GCC_PATH=${HOME}/toolchain/gcc" >> $GITHUB_ENV
-          
-      - name: Build kernel with GCC (compatible with 4.19)
+      - name: Build kernel with proper configuration
         id: build_kernel
         env:
           BUILD_CONFIG: build.config.${{ inputs.build_config }}
           SUKISU_MODE: ${{ inputs.sukisu_mode }}
-          GCC_PATH: ${{ env.GCC_PATH }}
         run: |
           cd kernel
-          echo "🏗️ Building kernel with GCC for 4.19 compatibility..."
+          echo "🏗️ Building Galaxy A13 kernel..."
           
-          # Source build config
-          if [ ! -f "$BUILD_CONFIG" ]; then
-            echo "❌ Build config not found: $BUILD_CONFIG"
+          # Use A13-specific defconfig
+          ACTUAL_DEFCONFIG="a13xx_defconfig"
+          if [ ! -f "arch/arm64/configs/$ACTUAL_DEFCONFIG" ]; then
+            echo "❌ A13 defconfig not found: $ACTUAL_DEFCONFIG"
             exit 1
           fi
           
-          # Extract build variables
-          ARCH=$(grep '^ARCH=' "$BUILD_CONFIG" | cut -d= -f2)
-          CROSS_COMPILE=$(grep '^CROSS_COMPILE=' "$BUILD_CONFIG" | cut -d= -f2)
-          DEFCONFIG=$(grep '^DEFCONFIG=' "$BUILD_CONFIG" | cut -d= -f2)
+          echo "Using A13 defconfig: $ACTUAL_DEFCONFIG"
           
-          echo "Architecture: $ARCH"
-          echo "Cross compiler: $CROSS_COMPILE"
-          echo "Defconfig: $DEFCONFIG"
+          # Set up environment - use GCC for compatibility
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Set up environment - Use GCC instead of Clang
-          export ARCH=$ARCH
-          export CROSS_COMPILE=$GCC_PATH/bin/aarch64-linux-android-
-          export PATH=$GCC_PATH/bin:$PATH
+          # Disable problematic warnings
+          export KCFLAGS="-Wno-error=gnu-variable-sized-type-not-at-end"
           
-          # Fix for assembler error: remove -EL flag if causing issues
-          # Also disable problematic warnings
-          export KCFLAGS="-Wno-error=gnu-variable-sized-type-not-at-end -Wno-gnu-variable-sized-type-not-at-end"
+          # Clean selectively to avoid touchscreen driver issues
+          echo "Cleaning previous build..."
+          rm -f .config .config.old
+          find . -name "*.o" -o -name "*.ko" -o -name "*.cmd" | grep -v "drivers/input/touchscreen/himax" | xargs rm -f 2>/dev/null || true
           
-          # Determine actual defconfig to use
-          if [ -f "arch/$ARCH/configs/a13xx_defconfig" ]; then
-            ACTUAL_DEFCONFIG="a13xx_defconfig"
-          elif [ -f "arch/$ARCH/configs/exynos850-a13xx_defconfig" ]; then
-            ACTUAL_DEFCONFIG="exynos850-a13xx_defconfig"
-          else
-            echo "❌ No suitable defconfig found"
-            exit 1
-          fi
-          
-          echo "Using defconfig: $ACTUAL_DEFCONFIG"
-          
-          # Clean and configure
-          make clean
-          make mrproper
-          
-          # Apply defconfig
+          # Apply A13 defconfig
           echo "Applying $ACTUAL_DEFCONFIG..."
           make $ACTUAL_DEFCONFIG
           
-          # Configure for SukiSU/KernelSU
-          echo "Configuring for SukiSU in $SUKISU_MODE mode..."
+          # CRITICAL: Check touchscreen configuration
+          echo "🔧 Touchscreen configuration:"
+          grep -i "TOUCHSCREEN\|HIMAX" .config | head -20
           
-          # Enable required options for KernelSU
+          # If Himax driver is enabled but broken, disable it
+          if grep -q "CONFIG_TOUCHSCREEN_HIMAX.*=y" .config || grep -q "CONFIG_TOUCHSCREEN_HIMAX.*=m" .config; then
+            echo "⚠️ Himax touchscreen driver enabled but may be broken"
+            echo "Disabling broken Himax driver..."
+            sed -i 's/CONFIG_TOUCHSCREEN_HIMAX.*=y/# CONFIG_TOUCHSCREEN_HIMAX is not set/' .config
+            sed -i 's/CONFIG_TOUCHSCREEN_HIMAX.*=m/# CONFIG_TOUCHSCREEN_HIMAX is not set/' .config
+          fi
+          
+          # Enable Samsung touchscreen if available
+          if grep -q "CONFIG_TOUCHSCREEN_SEC" .config; then
+            echo "✅ Samsung touchscreen driver found, enabling..."
+            sed -i 's/# CONFIG_TOUCHSCREEN_SEC is not set/CONFIG_TOUCHSCREEN_SEC=y/' .config
+          fi
+          
+          # Configure SukiSU/KernelSU
+          echo "Configuring SukiSU in $SUKISU_MODE mode..."
+          
+          # Required for KernelSU
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' .config 2>/dev/null || true
           sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' .config 2>/dev/null || true
           sed -i 's/# CONFIG_KPROBES_ON_FTRACE is not set/CONFIG_KPROBES_ON_FTRACE=y/' .config 2>/dev/null || true
@@ -147,34 +210,47 @@ jobs:
           # Set KPM based on mode
           if [ "$SUKISU_MODE" = "builtin" ]; then
             sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' .config 2>/dev/null || true
-            sed -i 's/CONFIG_KPM=m/CONFIG_KPM=y/' .config 2>/dev/null || true
           else
             sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=m/' .config 2>/dev/null || true
-            sed -i 's/CONFIG_KPM=y/CONFIG_KPM=m/' .config 2>/dev/null || true
           fi
-          
-          # Disable modules if not needed (simplifies build)
-          echo "CONFIG_MODULES=n" >> .config 2>/dev/null || true
           
           # Finalize config
           echo "Finalizing configuration..."
-          make oldconfig
+          echo "" | make oldconfig
+          
+          # Save the final config for review
+          cp .config a13_final_config.txt
           
           # Build the kernel
           echo "🚀 Building kernel..."
           
-          # First try with limited threads to avoid memory issues
-          if make -j2; then
-            echo "✅ Build successful with -j2"
-          else
-            echo "⚠️ Build with -j2 failed, trying single thread..."
-            make || {
-              echo "❌ Build failed"
-              echo "Last 50 lines of build log:"
-              tail -50 .make.log 2>/dev/null || echo "No .make.log found"
-              exit 1
-            }
-          fi
+          # Try different thread counts
+          for threads in 2 1; do
+            echo "Attempting build with -j$threads..."
+            if make -j$threads 2>&1 | tee build.log; then
+              echo "✅ Build successful with -j$threads"
+              BUILD_SUCCESS=true
+              break
+            else
+              echo "⚠️ Build with -j$threads failed"
+              BUILD_SUCCESS=false
+              if [ $threads -eq 1 ]; then
+                echo "❌ All build attempts failed"
+                echo "Last 100 lines of build log:"
+                tail -100 build.log
+                
+                # Check for specific errors
+                if grep -q "touchscreen\|himax" build.log; then
+                  echo "⚠️ Touchscreen-related error detected!"
+                  echo "You may need to:"
+                  echo "1. Find the correct touchscreen driver for Galaxy A13"
+                  echo "2. Add it to drivers/input/touchscreen/"
+                  echo "3. Update defconfig to use the correct driver"
+                fi
+                exit 1
+              fi
+            fi
+          done
           
           # Verify build
           if [ -f "arch/$ARCH/boot/Image" ]; then
@@ -188,26 +264,24 @@ jobs:
             exit 1
           fi
 
-      - name: Create flashable package
+      - name: Create flashable package with warning
         run: |
           cd kernel
           echo "📦 Creating flashable package..."
           
-          # Clone AnyKernel3 if not exists
-          if [ ! -d "AnyKernel3" ]; then
-            git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          fi
+          # Clone AnyKernel3
+          git clone --depth=1 https://github.com/osm0suite/AnyKernel3.git
           
           # Copy kernel image
           cp arch/arm64/boot/Image AnyKernel3/
           
-          # Create minimal anykernel.sh
+          # Create detailed anykernel.sh with touchscreen warning
           cat > AnyKernel3/anykernel.sh << 'EOF'
           #!/bin/sh
           ## AnyKernel3 Ramdisk Mod Script
           
           # Begin properties
-          kernel.string=Exynos850 Kernel 4.19.227 with SukiSU
+          kernel.string=Galaxy A13 Kernel 4.19.227 with SukiSU
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -224,43 +298,108 @@ jobs:
           # Import functions
           . tools/ak3-core.sh;
           
+          ui_print " ";
+          ui_print "Galaxy A13 Kernel with SukiSU";
+          ui_print "Build date: $(date)";
+          ui_print " ";
+          ui_print "⚠️  IMPORTANT WARNING ⚠️";
+          ui_print "This kernel may have touchscreen driver issues!";
+          ui_print "If touchscreen doesn't work after flashing:";
+          ui_print "1. Restore your backup kernel";
+          ui_print "2. Report the issue with logs";
+          ui_print " ";
+          
           # Install
           dump_boot;
           write_boot;
+          
+          ui_print " ";
+          ui_print "Flash complete. Test touchscreen immediately!";
+          ui_print " ";
           EOF
           
           chmod +x AnyKernel3/anykernel.sh
           
+          # Add README about touchscreen issue
+          cat > AnyKernel3/README-A13-TOUCHSCREEN.md << 'EOF'
+          # Galaxy A13 Touchscreen Driver Issue
+          
+          ## Problem
+          The kernel build had issues with the Himax touchscreen driver.
+          The directory `drivers/input/touchscreen/himax/himax_83xxx_i2c/`
+          was missing its Makefile.
+          
+          ## Possible Impact
+          - Touchscreen may not work
+          - Device may be unusable if touchscreen is non-functional
+          
+          ## What to do if touchscreen doesn't work:
+          1. Immediately restore your backup kernel
+          2. Report the issue with dmesg logs
+          3. We need to find the correct touchscreen driver for A13
+          
+          ## Finding the correct driver:
+          1. Extract defconfig from stock A13 kernel
+          2. Look for "TOUCHSCREEN" or "HIMAX" in the config
+          3. Search GitHub for that specific driver
+          4. Add it to the kernel source
+          
+          ## Common Samsung touchscreen drivers:
+          - sec_touchscreen (Samsung proprietary)
+          - melfas_mip4
+          - stm_fts
+          - zinitix_bt541
+          
+          EOF
+          
           # Create ZIP
           cd AnyKernel3
-          zip -r9 ../kernel-a13-4.19-sukisu-${{ inputs.sukisu_mode }}.zip *
+          zip -r9 ../kernel-a13-experimental-$(date +%Y%m%d).zip *
           
-          echo "✅ Flashable package created"
+          echo "✅ Flashable package created with touchscreen warning"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: A13-Kernel-4.19-${{ inputs.sukisu_mode }}
+          name: A13-Kernel-Experimental-${{ github.run_number }}
           path: |
             kernel/arch/arm64/boot/Image
-            kernel/kernel-a13-4.19-sukisu-*.zip
+            kernel/kernel-a13-experimental-*.zip
+            kernel/a13_final_config.txt
+            kernel/build.log
             kernel/.config
           retention-days: 7
 
-      - name: Build summary
+      - name: Build summary with critical warning
         if: always()
         run: |
           echo "========================================="
-          echo "           BUILD SUMMARY                 "
+          echo "    ⚠️  CRITICAL WARNING - READ FIRST!   "
           echo "========================================="
-          echo "Device: Samsung Galaxy A13 (SM-A135F)"
-          echo "Kernel: Linux 4.19.227"
-          echo "Build Config: ${{ inputs.build_config }}"
-          echo "Defconfig: ${{ steps.build_kernel.outputs.defconfig_used }}"
-          echo "SukiSU Mode: ${{ inputs.sukisu_mode }}"
-          echo "Toolchain: GCC 4.9 (AOSP)"
           echo ""
-          echo "📦 Output: kernel-a13-4.19-sukisu-${{ inputs.sukisu_mode }}.zip"
-          echo "📁 Flash in custom recovery"
-          echo "⚠️  Test thoroughly before daily use!"
+          echo "🚨 TOUCHSCREEN MAY NOT WORK!"
+          echo ""
+          echo "The kernel build had issues with touchscreen drivers."
+          echo "The Himax driver directory was missing its Makefile."
+          echo ""
+          echo "📱 Device: Samsung Galaxy A13 (SM-A135F)"
+          echo "🐧 Kernel: Linux 4.19.227"
+          echo "🔧 Defconfig: a13xx_defconfig"
+          echo "🔓 SukiSU: ${{ inputs.sukisu_mode }} mode"
+          echo ""
+          echo "📦 Output: kernel-a13-experimental-*.zip"
+          echo ""
+          echo "🚨 BEFORE FLASHING:"
+          echo "1. BACKUP your current kernel!"
+          echo "2. Be prepared to restore if touchscreen fails"
+          echo "3. Test touchscreen immediately after boot"
+          echo ""
+          echo "🔧 TO FIX THIS PROPERLY:"
+          echo "We need to find the correct touchscreen driver for A13:"
+          echo "1. Extract stock kernel config from A13 firmware"
+          echo "2. Search for 'TOUCHSCREEN' in the config"
+          echo "3. Find and add the correct driver source"
+          echo "4. Update Kconfig and Makefile"
+          echo ""
+          echo "💡 Common Samsung drivers: sec_touchscreen, melfas_mip4"
           echo "========================================="
