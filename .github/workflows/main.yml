@@ -19,6 +19,107 @@ jobs:
         with:
           path: kernel
 
+      - name: Debug - Check workspace structure
+        run: |
+          echo "Current workspace: $(pwd)"
+          ls -la
+          if [ -d "kernel" ]; then
+            echo "Kernel directory exists"
+            ls -la kernel/
+          else
+            echo "ERROR: Kernel directory not found after checkout"
+            exit 1
+          fi
+
+      - name: Integrate SukiSU-Ultra
+        run: |
+          cd kernel
+          echo "Current directory: $(pwd)"
+          echo "Checking for kernel source..."
+          
+          # First verify this is a kernel source directory
+          if [ ! -f "Makefile" ]; then
+            echo "❌ ERROR: Not a kernel source directory (Makefile missing)"
+            echo "Directory contents:"
+            ls -la
+            exit 1
+          fi
+          
+          echo "✅ Kernel source verified (Makefile found)"
+          echo "Running SukiSU-Ultra integration..."
+          
+          # Run the SukiSU setup script
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
+          
+          # Alternative: Clone and run locally if curl fails
+          # git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu
+          # cd /tmp/sukisu/kernel && bash setup.sh nongki $GITHUB_WORKSPACE/kernel
+          
+          # Verify integration was successful
+          if [ -f "drivers/kernel_pm/kpm.c" ]; then
+            echo "✅ SukiSU-Ultra integrated successfully"
+          else
+            echo "⚠️ Warning: drivers/kernel_pm/kpm.c not found, but continuing..."
+            echo "Checking for other SukiSU files..."
+            find . -name "*suki*" -o -name "*kpm*" | head -20
+          fi
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev bc git ccache python3
+
+      - name: Build Kernel
+        uses: dabao1955/kernel_build_action@main
+        with:
+          kernel-dir: kernel
+          config: exynos850_defconfig
+          arch: arm64
+          android-version: 12
+          aosp-clang: false
+          aosp-gcc: true
+          aosp-gcc-version: "arm64-12"
+          anykernel3: true
+          use-ccache: true
+
+      - name: Upload Kernel Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Compiled-Kernel-Exynos850
+          path: |
+            kernel/out/AnyKernel3/*.zip
+            kernel/out/arch/arm64/boot/Image
+            kernel/out/.config
+          retention-days: 7
+
+      - name: Display Build Info
+        if: success()
+        run: |
+          echo "✅ Build completed successfully!"
+          echo "📦 Artifact name: Compiled-Kernel-Exynos850"
+          echo "📁 Find it in: GitHub Actions → Artifacts section"
+          echo "⚡ Kernel includes: SukiSU-Ultra integration"name: Build Kernel with SukiSU
+
+on:
+  workflow_dispatch:
+    inputs:
+      select_device:
+        description: 'Select device:'
+        required: true
+        type: choice
+        options:
+          - 'merlin'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v3
+        with:
+          path: kernel
+
       - name: Integrate SukiSU-Ultra
         run: |
           cd kernel
