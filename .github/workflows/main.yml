@@ -33,139 +33,150 @@ jobs:
           cd kernel
           echo "✅ Kernel version: $(grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | tr '\n' '.' | sed 's/\.$//')"
 
-      - name: Analyze defconfig options
-        run: |
-          cd kernel
-          echo "🔍 Available defconfig files in arch/arm64/configs/:"
-          ls -la arch/arm64/configs/ 2>/dev/null || echo "No arch/arm64/configs directory"
-          echo ""
-          echo "🔍 Searching for all defconfig files..."
-          find . -name "*defconfig*" -type f | grep -v ".git" | head -20
-
       - name: Install build dependencies
         run: |
           echo "📦 Installing dependencies..."
           sudo apt-get update
           sudo apt-get install -y build-essential libncurses-dev bison flex \
-          libssl-dev libelf-dev bc git ccache python3 zip unzip curl wget
+          libssl-dev libelf-dev bc git ccache python3 zip unzip curl wget \
+          llvm lld clang gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          libxml2-utils python3-pip
 
-      - name: Integrate SukiSU-Ultra
+          # Install specific tools needed for this kernel
+          pip3 install pyelftools
+
+      - name: Integrate SukiSU-Ultra (builtin mode)
         run: |
           cd kernel
           echo "🔓 Integrating SukiSU-Ultra in ${{ inputs.sukisu_mode }} mode..."
           
-          # Download the setup script
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" -o setup_sukisu.sh
+          # Note: The SukiSU integration is actually using KernelSU internally
+          # The output shows it cloned KernelSU repository
+          echo "Running SukiSU/KernelSU integration..."
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ inputs.sukisu_mode }} || {
+            echo "⚠️ SukiSU integration had warnings, continuing..."
+          }
           
-          if [ -f "setup_sukisu.sh" ]; then
-            chmod +x setup_sukisu.sh
-            echo "Running: ./setup_sukisu.sh ${{ inputs.sukisu_mode }}"
-            ./setup_sukisu.sh ${{ inputs.sukisu_mode }} || {
-              echo "⚠️ SukiSU integration script returned error, continuing build..."
-            }
+          # Verify integration
+          if [ -d "KernelSU" ] || [ -d "drivers/kernel_pm" ]; then
+            echo "✅ SukiSU/KernelSU integration found"
           else
-            echo "❌ Failed to download setup script"
-            echo "Trying direct execution..."
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s ${{ inputs.sukisu_mode }}
-          fi
-          
-          # Post-integration verification
-          echo "🔍 Verifying integration..."
-          if [ -f "drivers/kernel_pm/kpm.c" ]; then
-            echo "✅ SukiSU kernel module source found at drivers/kernel_pm/kpm.c"
-          else
-            echo "⚠️ SukiSU files not found in standard location"
+            echo "⚠️ Checking for integration files..."
+            find . -type d -name "*kernel*" -o -name "*kpm*" | head -10
           fi
 
-      - name: Build using Android build config
+      - name: Set up proper toolchain
+        run: |
+          echo "🔧 Setting up toolchain for 4.19 kernel..."
+          
+          # For 4.19 kernel, we need specific toolchain
+          mkdir -p ${HOME}/toolchain
+          cd ${HOME}/toolchain
+          
+          # Download AOSP GCC 4.9 (compatible with 4.19 kernel)
+          wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/master.tar.gz -O gcc.tar.gz
+          mkdir -p gcc
+          tar -xzf gcc.tar.gz -C gcc --strip-components=1
+          
+          echo "GCC_PATH=${HOME}/toolchain/gcc" >> $GITHUB_ENV
+          
+      - name: Build kernel with GCC (compatible with 4.19)
         id: build_kernel
         env:
           BUILD_CONFIG: build.config.${{ inputs.build_config }}
           SUKISU_MODE: ${{ inputs.sukisu_mode }}
+          GCC_PATH: ${{ env.GCC_PATH }}
         run: |
           cd kernel
-          echo "🏗️ Building with config: $BUILD_CONFIG"
-          echo "SukiSU mode: $SUKISU_MODE"
+          echo "🏗️ Building kernel with GCC for 4.19 compatibility..."
           
-          # Source the build configuration
+          # Source build config
           if [ ! -f "$BUILD_CONFIG" ]; then
             echo "❌ Build config not found: $BUILD_CONFIG"
-            echo "Available configs:"
-            ls build.config.*
             exit 1
           fi
           
-          source "$BUILD_CONFIG" 2>/dev/null || true
+          # Extract build variables
+          ARCH=$(grep '^ARCH=' "$BUILD_CONFIG" | cut -d= -f2)
+          CROSS_COMPILE=$(grep '^CROSS_COMPILE=' "$BUILD_CONFIG" | cut -d= -f2)
+          DEFCONFIG=$(grep '^DEFCONFIG=' "$BUILD_CONFIG" | cut -d= -f2)
           
-          echo "📋 Build configuration:"
-          echo "  Architecture: $ARCH"
-          echo "  Original DEFCONFIG: $DEFCONFIG"
-          echo "  Cross compiler: $CROSS_COMPILE"
-          echo "  Clang version: $CLANG_VERSION"
-          echo "  Target SoC: $TARGET_SOC"
+          echo "Architecture: $ARCH"
+          echo "Cross compiler: $CROSS_COMPILE"
+          echo "Defconfig: $DEFCONFIG"
           
-          # Set up environment
+          # Set up environment - Use GCC instead of Clang
           export ARCH=$ARCH
-          export CROSS_COMPILE=$CROSS_COMPILE
-          export CLANG_TRIPLE=$CLANG_TRIPLE
+          export CROSS_COMPILE=$GCC_PATH/bin/aarch64-linux-android-
+          export PATH=$GCC_PATH/bin:$PATH
           
-          # DETERMINE CORRECT DEFCONFIG
-          # The build.config says universal3830_s_launching_defconfig but it doesn't exist
-          # From exploration, we have: a13xx_defconfig and exynos850-a13xx_defconfig
-          # Let's use the most appropriate one
+          # Fix for assembler error: remove -EL flag if causing issues
+          # Also disable problematic warnings
+          export KCFLAGS="-Wno-error=gnu-variable-sized-type-not-at-end -Wno-gnu-variable-sized-type-not-at-end"
+          
+          # Determine actual defconfig to use
           if [ -f "arch/$ARCH/configs/a13xx_defconfig" ]; then
             ACTUAL_DEFCONFIG="a13xx_defconfig"
-            echo "✅ Using defconfig: $ACTUAL_DEFCONFIG (A13 specific)"
           elif [ -f "arch/$ARCH/configs/exynos850-a13xx_defconfig" ]; then
             ACTUAL_DEFCONFIG="exynos850-a13xx_defconfig"
-            echo "✅ Using defconfig: $ACTUAL_DEFCONFIG (Exynos 850 A13)"
           else
-            echo "❌ No suitable defconfig found!"
-            echo "Available defconfigs in arch/$ARCH/configs/:"
-            ls arch/$ARCH/configs/ 2>/dev/null || echo "Directory not found"
+            echo "❌ No suitable defconfig found"
             exit 1
           fi
           
-          # Apply the defconfig
-          echo "Applying defconfig: $ACTUAL_DEFCONFIG"
+          echo "Using defconfig: $ACTUAL_DEFCONFIG"
+          
+          # Clean and configure
+          make clean
+          make mrproper
+          
+          # Apply defconfig
+          echo "Applying $ACTUAL_DEFCONFIG..."
           make $ACTUAL_DEFCONFIG
           
-          # Update configuration for SukiSU mode
-          echo "⚙️ Configuring kernel for SukiSU..."
+          # Configure for SukiSU/KernelSU
+          echo "Configuring for SukiSU in $SUKISU_MODE mode..."
           
-          # First, ensure we have the scripts/config utility
-          if [ ! -f "scripts/config" ]; then
-            echo "⚠️ scripts/config not found, using sed for config changes"
-            if [ "$SUKISU_MODE" = "builtin" ]; then
-              # Enable KPM as built-in
-              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' .config 2>/dev/null || true
-              sed -i 's/CONFIG_KPM=m/CONFIG_KPM=y/' .config 2>/dev/null || true
-            else
-              # Enable KPM as module
-              sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=m/' .config 2>/dev/null || true
-              sed -i 's/CONFIG_KPM=y/CONFIG_KPM=m/' .config 2>/dev/null || true
-            fi
-          else
-            if [ "$SUKISU_MODE" = "builtin" ]; then
-              scripts/config --set-val CONFIG_KPM y
-            else
-              scripts/config --set-val CONFIG_KPM m
-            fi
-          fi
-          
-          # Also enable KALLSYMS and KALLSYMS_ALL for SukiSU
+          # Enable required options for KernelSU
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' .config 2>/dev/null || true
+          sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' .config 2>/dev/null || true
+          sed -i 's/# CONFIG_KPROBES_ON_FTRACE is not set/CONFIG_KPROBES_ON_FTRACE=y/' .config 2>/dev/null || true
           sed -i 's/# CONFIG_KALLSYMS is not set/CONFIG_KALLSYMS=y/' .config 2>/dev/null || true
           sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' .config 2>/dev/null || true
           
+          # Set KPM based on mode
+          if [ "$SUKISU_MODE" = "builtin" ]; then
+            sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' .config 2>/dev/null || true
+            sed -i 's/CONFIG_KPM=m/CONFIG_KPM=y/' .config 2>/dev/null || true
+          else
+            sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=m/' .config 2>/dev/null || true
+            sed -i 's/CONFIG_KPM=y/CONFIG_KPM=m/' .config 2>/dev/null || true
+          fi
+          
+          # Disable modules if not needed (simplifies build)
+          echo "CONFIG_MODULES=n" >> .config 2>/dev/null || true
+          
           # Finalize config
-          echo "Finalizing kernel configuration..."
+          echo "Finalizing configuration..."
           make oldconfig
           
           # Build the kernel
-          echo "🚀 Starting kernel build with $(nproc) threads..."
-          make -j$(nproc)
+          echo "🚀 Building kernel..."
           
-          # Verify the build
+          # First try with limited threads to avoid memory issues
+          if make -j2; then
+            echo "✅ Build successful with -j2"
+          else
+            echo "⚠️ Build with -j2 failed, trying single thread..."
+            make || {
+              echo "❌ Build failed"
+              echo "Last 50 lines of build log:"
+              tail -50 .make.log 2>/dev/null || echo "No .make.log found"
+              exit 1
+            }
+          fi
+          
+          # Verify build
           if [ -f "arch/$ARCH/boot/Image" ]; then
             echo "✅ Kernel image built successfully!"
             ls -lh "arch/$ARCH/boot/Image"
@@ -173,24 +184,8 @@ jobs:
             echo "kernel_version=4.19.227" >> $GITHUB_OUTPUT
             echo "defconfig_used=$ACTUAL_DEFCONFIG" >> $GITHUB_OUTPUT
           else
-            echo "❌ Build failed - no kernel image found"
-            echo "Trying with fewer threads..."
-            make -j2 || {
-              echo "Build still failed, checking for errors..."
-              exit 1
-            }
-            
-            # Check again
-            if [ -f "arch/$ARCH/boot/Image" ]; then
-              echo "✅ Kernel image built successfully with -j2!"
-              ls -lh "arch/$ARCH/boot/Image"
-              echo "kernel_image=arch/$ARCH/boot/Image" >> $GITHUB_OUTPUT
-              echo "kernel_version=4.19.227" >> $GITHUB_OUTPUT
-              echo "defconfig_used=$ACTUAL_DEFCONFIG" >> $GITHUB_OUTPUT
-            else
-              echo "❌ Build completely failed"
-              exit 1
-            fi
+            echo "❌ Kernel image not found"
+            exit 1
           fi
 
       - name: Create flashable package
@@ -198,84 +193,74 @@ jobs:
           cd kernel
           echo "📦 Creating flashable package..."
           
-          # Download AnyKernel3
+          # Clone AnyKernel3 if not exists
           if [ ! -d "AnyKernel3" ]; then
             git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           fi
           
-          # Copy the kernel image
+          # Copy kernel image
           cp arch/arm64/boot/Image AnyKernel3/
           
-          # Create device-specific anykernel.sh
-          cat > AnyKernel3/anykernel.sh << EOF
+          # Create minimal anykernel.sh
+          cat > AnyKernel3/anykernel.sh << 'EOF'
           #!/bin/sh
           ## AnyKernel3 Ramdisk Mod Script
           
           # Begin properties
-          properties() {
-            kernel.string=Exynos850 Kernel with SukiSU ${{ inputs.sukisu_mode }}
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            device.name1=a13
-            device.name2=a135f
-            device.name3=exynos850
-          }
+          kernel.string=Exynos850 Kernel 4.19.227 with SukiSU
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          device.name1=a13
+          device.name2=a135f
+          device.name3=exynos850
           
-          # Device block (common for Exynos devices)
+          # Device block
           block=/dev/block/platform/13500000.dwmmc0/by-name/BOOT;
           is_slot_device=0;
           ramdisk_compression=auto;
           
-          # Import patching functions/variables
+          # Import functions
           . tools/ak3-core.sh;
           
-          # AnyKernel install
+          # Install
           dump_boot;
           write_boot;
-          ## end install
           EOF
           
           chmod +x AnyKernel3/anykernel.sh
           
-          # Create the flashable ZIP
+          # Create ZIP
           cd AnyKernel3
-          zip -r9 ../kernel-a13-sukisu-${{ inputs.sukisu_mode }}-$(date +%Y%m%d).zip *
+          zip -r9 ../kernel-a13-4.19-sukisu-${{ inputs.sukisu_mode }}.zip *
           
-          echo "✅ Flashable ZIP created"
+          echo "✅ Flashable package created"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: A13-Kernel-${{ inputs.sukisu_mode }}-${{ github.run_number }}
+          name: A13-Kernel-4.19-${{ inputs.sukisu_mode }}
           path: |
             kernel/arch/arm64/boot/Image
-            kernel/kernel-a13-sukisu-*.zip
+            kernel/kernel-a13-4.19-sukisu-*.zip
             kernel/.config
-            kernel/System.map
           retention-days: 7
 
       - name: Build summary
         if: always()
         run: |
           echo "========================================="
-          echo "           🎉 BUILD COMPLETE              "
+          echo "           BUILD SUMMARY                 "
           echo "========================================="
-          echo "📱 Device: Samsung Galaxy A13 (SM-A135F)"
-          echo "🐧 Kernel: Linux 4.19.227"
-          echo "⚙️  Build Config: ${{ inputs.build_config }}"
-          echo "🔧 Defconfig Used: ${{ steps.build_kernel.outputs.defconfig_used || 'a13xx_defconfig' }}"
-          echo "🔓 SukiSU: ${{ inputs.sukisu_mode }} mode"
-          echo "🔄 Branch: ${{ inputs.kernel_branch }}"
+          echo "Device: Samsung Galaxy A13 (SM-A135F)"
+          echo "Kernel: Linux 4.19.227"
+          echo "Build Config: ${{ inputs.build_config }}"
+          echo "Defconfig: ${{ steps.build_kernel.outputs.defconfig_used }}"
+          echo "SukiSU Mode: ${{ inputs.sukisu_mode }}"
+          echo "Toolchain: GCC 4.9 (AOSP)"
           echo ""
-          echo "📦 Artifacts:"
-          echo "  • kernel-a13-sukisu-*.zip - Flash in recovery"
-          echo "  • Image - Raw kernel image"
-          echo "  • .config - Kernel configuration"
-          echo ""
-          echo "⚠️  IMPORTANT:"
-          echo "   • The build config specified universal3830_s_launching_defconfig"
-          echo "   • But we used ${{ steps.build_kernel.outputs.defconfig_used || 'a13xx_defconfig' }} as fallback"
-          echo "   • Test thoroughly before daily use!"
+          echo "📦 Output: kernel-a13-4.19-sukisu-${{ inputs.sukisu_mode }}.zip"
+          echo "📁 Flash in custom recovery"
+          echo "⚠️  Test thoroughly before daily use!"
           echo "========================================="
