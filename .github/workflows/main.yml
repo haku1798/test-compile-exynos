@@ -1,149 +1,166 @@
-name: Build Kernel with SukiSU
+name: Build Exynos 850 Kernel for A13 with SukiSU-Ultra
 
 on:
   workflow_dispatch:
     inputs:
+      build_config:
+        description: 'Build config (use universal3830_32bit_s for A13)'
+        required: true
+        default: 'universal3830_32bit_s'
       kernel_branch:
-        description: 'Kernel branch/tag (leave empty for default)'
+        description: 'Kernel branch'
         required: false
-        default: ''
+        default: 'android-4.19-stable'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # Step 1: Clone the Samsung kernel repository
-      - name: Clone Samsung Kernel Source
+      - name: Checkout kernel source
         run: |
-          echo "Cloning Samsung Exynos850 kernel repository..."
-          
-          # First, try without specific branch to see what's available
-          if [ -z "${{ inputs.kernel_branch }}" ]; then
-            echo "No branch specified, cloning default branch..."
-            git clone --depth=1 https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel
-          else
-            echo "Trying to clone with branch: ${{ inputs.kernel_branch }}"
-            # Try branch first, then tag if branch fails
-            git clone --depth=1 --branch "${{ inputs.kernel_branch }}" https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel || \
-            echo "⚠️ Branch '${{ inputs.kernel_branch }}' not found, trying default branch..."
-            if [ ! -d "kernel" ]; then
-              git clone --depth=1 https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git kernel
-            fi
-          fi
-          
+          echo "📥 Cloning kernel source..."
+          git clone --depth=1 --branch "${{ inputs.kernel_branch }}" \
+            https://github.com/Samsung-Galaxy-A13-A135F-Development/android_kernel_samsung_exynos850.git \
+            kernel
           cd kernel
-          echo "Current branch: $(git branch --show-current)"
-          echo "Latest commit: $(git log --oneline -1)"
+          echo "✅ Using kernel: $(grep -E '^VERSION|^PATCHLEVEL|^SUBLEVEL' Makefile | tr '\n' '.' | sed 's/\.$//')"
 
-      # Step 2: Find the correct defconfig for the device
-      - name: Find device defconfig
-        id: defconfig
+      - name: Install build dependencies
         run: |
-          cd kernel
-          echo "Searching for defconfig files..."
-          
-          # Common defconfig patterns for Exynos 850 devices
-          CONFIG_CANDIDATES=(
-            "exynos850_defconfig"
-            "a13_defconfig"
-            "a135f_defconfig"
-            "a13x_defconfig"
-            "s5e3830_defconfig"  # Exynos 850 chip codename
-          )
-          
-          if [ -d "arch/arm64/configs" ]; then
-            cd arch/arm64/configs
-            echo "Available defconfigs in arch/arm64/configs/:"
-            ls *.defconfig
-            
-            # Try each candidate
-            CONFIG_FOUND=""
-            for candidate in "${CONFIG_CANDIDATES[@]}"; do
-              if [ -f "$candidate" ]; then
-                CONFIG_FOUND="$candidate"
-                echo "✅ Found matching defconfig: $candidate"
-                break
-              fi
-            done
-            
-            if [ -z "$CONFIG_FOUND" ]; then
-              # Fallback to any defconfig
-              CONFIG_FOUND=$(ls *.defconfig | head -1)
-              echo "⚠️  Using first available defconfig: $CONFIG_FOUND"
-            fi
-            
-            echo "config_name=$CONFIG_FOUND" >> $GITHUB_OUTPUT
-          else
-            echo "❌ arch/arm64/configs directory not found"
-            echo "config_name=exynos850_defconfig" >> $GITHUB_OUTPUT
-          fi
+          echo "📦 Installing dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex \
+          libssl-dev libelf-dev bc git ccache python3 zip unzip curl wget
 
-      # Step 3: Integrate SukiSU-Ultra
       - name: Integrate SukiSU-Ultra
         run: |
           cd kernel
-          echo "=== KERNEL VERSION INFO ==="
-          head -10 Makefile | grep -E "VERSION|PATCHLEVEL|SUBLEVEL"
-          echo ""
+          echo "🔓 Integrating SukiSU-Ultra (non-GKI mode)..."
           
-          echo "Integrating SukiSU-Ultra..."
+          # Run SukiSU integration
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki || {
+            echo "⚠️ SukiSU integration encountered issues, continuing build..."
+          }
           
-          # Try the SukiSU integration
-          if curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki; then
-            echo "✅ SukiSU script executed"
-          else
-            echo "⚠️  SukiSU script failed, but continuing build..."
-          fi
-          
-          # Check kernel config for SukiSU requirements
-          if [ -f ".config" ] || [ -f "arch/arm64/configs/${{ steps.defconfig.outputs.config_name }}" ]; then
-            echo "Checking kernel configuration..."
-            # These are required for SukiSU/KernelSU
-            REQUIRED_CONFIGS=("CONFIG_KPROBES=y" "CONFIG_HAVE_KPROBES=y" "CONFIG_KPROBES_ON_FTRACE=y")
-            for config in "${REQUIRED_CONFIGS[@]}"; do
-              echo "Looking for: $config"
-            done
+          # Verify KPM module was added
+          if [ -f "drivers/kernel_pm/kpm.c" ]; then
+            echo "✅ SukiSU kernel module found"
           fi
 
-      # Step 4: Install build dependencies
-      - name: Install Build Dependencies
+      - name: Build using Android build config
+        id: build_kernel
+        env:
+          BUILD_CONFIG: build.config.${{ inputs.build_config }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev bison flex \
-          libssl-dev libelf-dev bc git ccache python3 rsync kmod
+          cd kernel
+          echo "🏗️ Building with config: $BUILD_CONFIG"
+          
+          # Source the build configuration
+          if [ ! -f "$BUILD_CONFIG" ]; then
+            echo "❌ Build config not found: $BUILD_CONFIG"
+            echo "Available configs:"
+            ls build.config.*
+            exit 1
+          fi
+          
+          source "$BUILD_CONFIG" 2>/dev/null || true
+          
+          echo "Architecture: $ARCH"
+          echo "Defconfig: $DEFCONFIG"
+          echo "Clang version: $CLANG_VERSION"
+          
+          # Set up environment
+          export ARCH=$ARCH
+          export CROSS_COMPILE=$CROSS_COMPILE
+          export CLANG_TRIPLE=$CLANG_TRIPLE
+          
+          # Apply the defconfig
+          echo "Applying defconfig: $DEFCONFIG"
+          make $DEFCONFIG
+          
+          # Build the kernel
+          echo "Starting build..."
+          make -j$(nproc)
+          
+          # Verify the build
+          if [ -f "arch/$ARCH/boot/Image" ]; then
+            echo "✅ Kernel image built successfully!"
+            ls -lh "arch/$ARCH/boot/Image"
+            echo "kernel_image=arch/$ARCH/boot/Image" >> $GITHUB_OUTPUT
+            echo "kernel_version=4.19.227" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Build failed - no kernel image found"
+            exit 1
+          fi
 
-      # Step 5: Build the kernel
-      - name: Build Kernel
-        uses: dabao1955/kernel_build_action@main
-        with:
-          kernel-dir: kernel
-          config: ${{ steps.defconfig.outputs.config_name }}
-          arch: arm64
-          android-version: 12
-          aosp-clang: false
-          aosp-gcc: true
-          aosp-gcc-version: "arm64-12"
-          anykernel3: true
-          use-ccache: true
-          # Additional flags for older kernels
-          make-args: "LLVM=0"
+      - name: Package for flashing
+        run: |
+          cd kernel
+          echo "📦 Creating flashable package..."
+          
+          # Download AnyKernel3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          
+          # Copy the kernel image
+          cp arch/arm64/boot/Image AnyKernel3/
+          
+          # Create device-specific anykernel.sh
+          cat > AnyKernel3/anykernel.sh << 'EOF'
+          #!/bin/sh
+          ## AnyKernel3 Ramdisk Mod Script
+          
+          properties() {
+            kernel.string=Exynos850 Kernel with SukiSU
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            device.name1=a13
+            device.name2=a135f
+            device.name3=exynos850
+          }
+          
+          block=/dev/block/platform/13500000.dwmmc0/by-name/BOOT;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          
+          . tools/ak3-core.sh;
+          
+          dump_boot;
+          write_boot;
+          EOF
+          
+          chmod +x AnyKernel3/anykernel.sh
+          
+          # Create the flashable ZIP
+          cd AnyKernel3
+          zip -r9 ../kernel-a13-sukisu.zip *
+          
+          echo "✅ Flashable ZIP created: kernel-a13-sukisu.zip"
 
-      # Step 6: Upload the built kernel
-      - name: Upload Kernel Artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Compiled-Kernel-Exynos850
+          name: A13-Kernel-Build-${{ github.run_number }}
           path: |
-            kernel/out/AnyKernel3/*.zip
-            kernel/out/arch/arm64/boot/Image
-            kernel/out/.config
+            kernel/arch/arm64/boot/Image
+            kernel/kernel-a13-sukisu.zip
+            kernel/.config
           retention-days: 7
 
-      # Step 7: Final status
-      - name: Display Build Info
-        if: success()
+      - name: Build summary
+        if: always()
         run: |
-          echo "✅ Kernel build completed successfully!"
-          echo "📦 Artifact name: Compiled-Kernel-Exynos850"
-          echo "🔧 Used defconfig: ${{ steps.defconfig.outputs.config_name }}"
-          echo "📁 Download from: GitHub Actions → Artifacts section"
+          echo "========================================="
+          echo "           BUILD SUMMARY                 "
+          echo "========================================="
+          echo "Device: Samsung Galaxy A13 (SM-A135F)"
+          echo "Kernel: Linux 4.19.227"
+          echo "Config: ${{ inputs.build_config }}"
+          echo "Branch: ${{ inputs.kernel_branch }}"
+          echo "Root: SukiSU-Ultra integrated"
+          echo ""
+          echo "📥 Artifacts available above"
+          echo "📁 Flash kernel-a13-sukisu.zip in recovery"
+          echo "⚠️  Test thoroughly before daily use!"
+          echo "========================================="
